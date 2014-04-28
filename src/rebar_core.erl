@@ -26,13 +26,42 @@
 %% -------------------------------------------------------------------
 -module(rebar_core).
 
--export([process_commands/2]).
+-export([process_commands/2, help/2]).
 
 -include("rebar.hrl").
 
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+help(ParentConfig, Commands) ->
+    %% get all core modules
+    {ok, AnyDirModules} = application:get_env(rebar, any_dir_modules),
+    {ok, RawCoreModules} = application:get_env(rebar, modules),
+    AppDirModules = proplists:get_value(app_dir, RawCoreModules),
+    RelDirModules = proplists:get_value(rel_dir, RawCoreModules),
+    CoreModules = AnyDirModules ++ AppDirModules ++ RelDirModules,
+
+    %% get plugin modules
+    Predirs = [],
+    Dir = rebar_utils:get_cwd(),
+    PredirsAssoc = remember_cwd_predirs(Dir, Predirs),
+    Config = maybe_load_local_config(Dir, ParentConfig),
+    {ok, PluginModules} = plugin_modules(Config, PredirsAssoc),
+
+    AllModules = CoreModules ++ PluginModules,
+
+    lists:foreach(
+      fun(Cmd) ->
+              ?CONSOLE("==> help ~p~n~n", [Cmd]),
+              CmdModules = select_modules(AllModules, Cmd, []),
+              Modules = select_modules(CmdModules, info, []),
+              lists:foreach(fun(M) ->
+                                    ?CONSOLE("=== ~p:~p ===~n", [M, Cmd]),
+                                    M:info(help, Cmd),
+                                    ?CONSOLE("~n", [])
+                            end, Modules)
+      end, Commands).
 
 process_commands([], ParentConfig) ->
     AbortTrapped = rebar_config:get_xconf(ParentConfig, abort_trapped, false),
@@ -110,21 +139,21 @@ process_dir(Dir, ParentConfig, Command, DirSet) ->
             {ok, AvailModuleSets} = application:get_env(rebar, modules),
             ModuleSet = choose_module_set(AvailModuleSets, Dir),
             skip_or_process_dir(ModuleSet, Config, CurrentCodePath,
-                              Dir, Command, DirSet)
+                                Dir, Command, DirSet)
     end.
 
 skip_or_process_dir({[], undefined}=ModuleSet, Config, CurrentCodePath,
-                  Dir, Command, DirSet) ->
+                    Dir, Command, DirSet) ->
     process_dir1(Dir, Command, DirSet, Config, CurrentCodePath, ModuleSet);
 skip_or_process_dir({_, ModuleSetFile}=ModuleSet, Config, CurrentCodePath,
-                  Dir, Command, DirSet) ->
+                    Dir, Command, DirSet) ->
     case lists:suffix(".app.src", ModuleSetFile)
         orelse lists:suffix(".app", ModuleSetFile) of
         true ->
             %% .app or .app.src file, check if is_skipped_app
             skip_or_process_dir1(ModuleSetFile, ModuleSet,
-                               Config, CurrentCodePath, Dir,
-                               Command, DirSet);
+                                 Config, CurrentCodePath, Dir,
+                                 Command, DirSet);
         false ->
             %% not an app dir, no need to consider apps=/skip_apps=
             process_dir1(Dir, Command, DirSet, Config,
@@ -132,8 +161,15 @@ skip_or_process_dir({_, ModuleSetFile}=ModuleSet, Config, CurrentCodePath,
     end.
 
 skip_or_process_dir1(AppFile, ModuleSet, Config, CurrentCodePath,
-                   Dir, Command, DirSet) ->
+                     Dir, Command, DirSet) ->
     case rebar_app_utils:is_skipped_app(Config, AppFile) of
+        {Config1, {true, _SkippedApp}} when Command == 'update-deps' ->
+            %% update-deps does its own app skipping. Unfortunately there's no
+            %% way to signal this to rebar_core, so we have to explicitly do it
+            %% here... Otherwise if you use app=, it'll skip the toplevel
+            %% directory and nothing will be updated.
+            process_dir1(Dir, Command, DirSet, Config1,
+                         CurrentCodePath, ModuleSet);
         {Config1, {true, SkippedApp}} ->
             ?DEBUG("Skipping app: ~p~n", [SkippedApp]),
             Config2 = increment_operations(Config1),
@@ -143,8 +179,9 @@ skip_or_process_dir1(AppFile, ModuleSet, Config, CurrentCodePath,
                          CurrentCodePath, ModuleSet)
     end.
 
-process_dir1(Dir, Command, DirSet, Config0, CurrentCodePath,
+process_dir1(Dir, Command, DirSet, Config, CurrentCodePath,
              {DirModules, ModuleSetFile}) ->
+    Config0 = rebar_config:set(Config, current_command, Command),
     %% Get the list of modules for "any dir". This is a catch-all list
     %% of modules that are processed in addition to modules associated
     %% with this directory type. These any_dir modules are processed
@@ -158,11 +195,12 @@ process_dir1(Dir, Command, DirSet, Config0, CurrentCodePath,
     {Config1, Predirs} = acc_modules(Modules, preprocess, Config0,
                                      ModuleSetFile),
 
-    SubdirAssoc = remember_cwd_subdir(Dir, Predirs),
+    %% Remember associated pre-dirs (used for plugin lookup)
+    PredirsAssoc = remember_cwd_predirs(Dir, Predirs),
 
     %% Get the list of plug-in modules from rebar.config. These
     %% modules may participate in preprocess and postprocess.
-    {ok, PluginModules} = plugin_modules(Config1, SubdirAssoc),
+    {ok, PluginModules} = plugin_modules(Config1, PredirsAssoc),
 
     {Config2, PluginPredirs} = acc_modules(PluginModules, preprocess,
                                            Config1, ModuleSetFile),
@@ -224,7 +262,7 @@ process_dir1(Dir, Command, DirSet, Config0, CurrentCodePath,
     %% Return the updated {config, dirset} as result
     Res.
 
-remember_cwd_subdir(Cwd, Subdirs) ->
+remember_cwd_predirs(Cwd, Predirs) ->
     Store = fun(Dir, Dict) ->
                     case dict:find(Dir, Dict) of
                         error ->
@@ -235,11 +273,10 @@ remember_cwd_subdir(Cwd, Subdirs) ->
                             ?ABORT("Internal consistency assertion failed.~n"
                                    "sub_dir ~s already associated with ~s.~n"
                                    "Duplicate sub_dirs or deps entries?",
-                                   [Dir, Existing]),
-                            Dict
+                                   [Dir, Existing])
                     end
             end,
-    lists:foldl(Store, dict:new(), Subdirs).
+    lists:foldl(Store, dict:new(), Predirs).
 
 maybe_load_local_config(Dir, ParentConfig) ->
     %% We need to ensure we don't overwrite custom
@@ -383,7 +420,10 @@ expand_lib_dirs([], _Root, Acc) ->
     Acc;
 expand_lib_dirs([Dir | Rest], Root, Acc) ->
     Apps = filelib:wildcard(filename:join([Dir, "*", "ebin"])),
-    FqApps = [filename:join([Root, A]) || A <- Apps],
+    FqApps = case filename:pathtype(Dir) of
+                 absolute -> Apps;
+                 _        -> [filename:join([Root, A]) || A <- Apps]
+             end,
     expand_lib_dirs(Rest, Root, Acc ++ FqApps).
 
 
@@ -459,9 +499,9 @@ acc_modules([Module | Rest], Command, Config, File, Acc) ->
 %%
 %% Return a flat list of rebar plugin modules.
 %%
-plugin_modules(Config, SubdirAssoc) ->
+plugin_modules(Config, PredirsAssoc) ->
     Modules = lists:flatten(rebar_config:get_all(Config, plugins)),
-    plugin_modules(Config, SubdirAssoc, ulist(Modules)).
+    plugin_modules(Config, PredirsAssoc, ulist(Modules)).
 
 ulist(L) ->
     ulist(L, []).
@@ -476,16 +516,16 @@ ulist([H | T], Acc) ->
             ulist(T, [H | Acc])
     end.
 
-plugin_modules(_Config, _SubdirAssoc, []) ->
+plugin_modules(_Config, _PredirsAssoc, []) ->
     {ok, []};
-plugin_modules(Config, SubdirAssoc, Modules) ->
+plugin_modules(Config, PredirsAssoc, Modules) ->
     FoundModules = [M || M <- Modules, code:which(M) =/= non_existing],
-    plugin_modules(Config, SubdirAssoc, FoundModules, Modules -- FoundModules).
+    plugin_modules(Config, PredirsAssoc, FoundModules, Modules -- FoundModules).
 
-plugin_modules(_Config, _SubdirAssoc, FoundModules, []) ->
+plugin_modules(_Config, _PredirsAssoc, FoundModules, []) ->
     {ok, FoundModules};
-plugin_modules(Config, SubdirAssoc, FoundModules, MissingModules) ->
-    {Loaded, NotLoaded} = load_plugin_modules(Config, SubdirAssoc,
+plugin_modules(Config, PredirsAssoc, FoundModules, MissingModules) ->
+    {Loaded, NotLoaded} = load_plugin_modules(Config, PredirsAssoc,
                                               MissingModules),
     AllViablePlugins = FoundModules ++ Loaded,
     case NotLoaded =/= [] of
@@ -499,37 +539,49 @@ plugin_modules(Config, SubdirAssoc, FoundModules, MissingModules) ->
     end,
     {ok, AllViablePlugins}.
 
-load_plugin_modules(Config, SubdirAssoc, Modules) ->
+load_plugin_modules(Config, PredirsAssoc, Modules) ->
     Cwd = rebar_utils:get_cwd(),
-    PluginDir = case rebar_config:get_local(Config, plugin_dir, undefined) of
-                    undefined ->
-                        filename:join(Cwd, "plugins");
-                    Dir ->
-                        Dir
-                end,
+    PluginDirs = get_all_plugin_dirs(Config, Cwd, PredirsAssoc),
 
     %% Find relevant sources in base_dir and plugin_dir
     Erls = string:join([atom_to_list(M)++"\\.erl" || M <- Modules], "|"),
     RE = "^" ++ Erls ++ "\$",
-    BaseDir = get_plugin_base_dir(Cwd, SubdirAssoc),
     %% If a plugin is found both in base_dir and plugin_dir, the clash
     %% will provoke an error and we'll abort.
-    Sources = rebar_utils:find_files(PluginDir, RE, false)
-        ++ rebar_utils:find_files(BaseDir, RE, false),
+    Sources = [rebar_utils:find_files(PD, RE, false) || PD <- PluginDirs],
 
     %% Compile and load plugins
-    Loaded = [load_plugin(Src) || Src <- Sources],
+    Loaded = [load_plugin(Src) || Src <- lists:append(Sources)],
     FilterMissing = is_missing_plugin(Loaded),
     NotLoaded = [V || V <- Modules, FilterMissing(V)],
     {Loaded, NotLoaded}.
 
-get_plugin_base_dir(Cwd, SubdirAssoc) ->
-    case dict:find(Cwd, SubdirAssoc) of
-        {ok, BaseDir} ->
-            BaseDir;
-        error ->
-            Cwd
+get_all_plugin_dirs(Config, Cwd, PredirsAssoc) ->
+    get_plugin_dir(Config, Cwd) ++ get_base_plugin_dirs(Cwd, PredirsAssoc).
+
+get_plugin_dir(Config, Cwd) ->
+    case rebar_config:get_local(Config, plugin_dir, undefined) of
+        undefined ->
+            %% Plugin can be in the project's "plugins" folder
+            [filename:join(Cwd, "plugins")];
+        Dir ->
+            [Dir]
     end.
+
+%% We also want to include this case:
+%% Plugin can be in "plugins" directory of the plugin base directory.
+%% For example, Cwd depends on Plugin, and deps/Plugin/plugins/Plugin.erl
+%% is the plugin.
+get_base_plugin_dirs(Cwd, PredirsAssoc) ->
+    [filename:join(Dir, "plugins") ||
+        Dir <- get_plugin_base_dirs(Cwd, PredirsAssoc)].
+
+%% @doc PredirsAssoc is a dictionary of plugindir -> 'parent' pairs
+%% 'parent' in this case depends on plugin; therefore we have to give
+%% all plugins that Cwd ('parent' in this case) depends on.
+get_plugin_base_dirs(Cwd, PredirsAssoc) ->
+    [PluginDir || {PluginDir, Master} <- dict:to_list(PredirsAssoc),
+                  Master =:= Cwd].
 
 is_missing_plugin(Loaded) ->
     fun(Mod) -> not lists:member(Mod, Loaded) end.

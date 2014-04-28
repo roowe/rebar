@@ -27,8 +27,11 @@
 -module(rebar_port_compiler).
 
 -export([compile/2,
-         clean/2,
-         setup_env/1]).
+         clean/2]).
+
+%% for internal use only
+-export([setup_env/1,
+         info/2]).
 
 -include("rebar.hrl").
 
@@ -97,7 +100,8 @@ compile(Config, AppFile) ->
         [] ->
             ok;
         Specs ->
-            SharedEnv = rebar_config:get_env(Config, ?MODULE),
+            SharedEnv = rebar_config:get_env(Config, rebar_deps) ++
+                rebar_config:get_env(Config, ?MODULE),
 
             %% Compile each of the sources
             NewBins = compile_sources(Config, Specs, SharedEnv),
@@ -148,6 +152,27 @@ setup_env(Config) ->
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+info(help, compile) ->
+    info_help("Build port sources");
+info(help, clean) ->
+    info_help("Delete port build results").
+
+info_help(Description) ->
+    ?CONSOLE(
+       "~s.~n"
+       "~n"
+       "Valid rebar.config options:~n"
+       "  ~p~n"
+       "  ~p~n",
+       [
+        Description,
+        {port_env, [{"CFLAGS", "$CFLAGS -Ifoo"},
+                    {"freebsd", "LDFLAGS", "$LDFLAGS -lfoo"}]},
+        {port_specs, [{"priv/so_name.so", ["c_src/*.c"]},
+                      {"linux", "priv/hello_linux", ["c_src/hello_linux.c"]},
+                      {"linux", "priv/hello_linux", ["c_src/*.c"], [{env, []}]}]}
+       ]).
 
 setup_env(Config, ExtraEnv) ->
     %% Extract environment values from the config (if specified) and

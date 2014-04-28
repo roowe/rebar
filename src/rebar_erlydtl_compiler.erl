@@ -96,6 +96,9 @@
 
 -export([compile/2]).
 
+%% for internal use only
+-export([info/2]).
+
 -include("rebar.hrl").
 
 %% ===================================================================
@@ -113,8 +116,8 @@ compile(Config, _AppFile) ->
                                      option(source_ext, DtlOpts),
                                      option(out_dir, DtlOpts),
                                      option(module_ext, DtlOpts) ++ ".beam",
-                                     fun(S, T, _C) ->
-                                        compile_dtl(S, T, DtlOpts)
+                                     fun(S, T, C) ->
+                                        compile_dtl(C, S, T, DtlOpts)
                                      end,
                                      [{check_last_mod, false},
                                       {recursive, option(recursive, DtlOpts)}])
@@ -123,10 +126,23 @@ compile(Config, _AppFile) ->
     true = code:set_path(OrigPath),
     Result.
 
-
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+info(help, compile) ->
+    ?CONSOLE(
+       "Build ErlyDtl (*.dtl) sources.~n"
+       "~n"
+       "Valid rebar.config options:~n"
+       "  ~p~n",
+       [
+        {erlydtl_opts, [{doc_root,   "templates"},
+                        {out_dir,    "ebin"},
+                        {source_ext, ".dtl"},
+                        {module_ext, "_dtl"},
+                        {recursive, true}]}
+       ]).
 
 erlydtl_opts(Config) ->
     Opts = rebar_config:get(Config, erlydtl_opts, []),
@@ -135,11 +151,14 @@ erlydtl_opts(Config) ->
         [] ->
             [lists:keysort(1, Tuples)];
         Lists ->
-            lists:map(fun(L) ->
-                lists:keysort(1, lists:foldl(fun({K,T}, Acc) ->
-                    lists:keystore(K, 1, Acc, {K, T})
-                end, Tuples, L))
-            end, Lists)
+            lists:map(
+              fun(L) ->
+                      lists:keysort(1,
+                                    lists:foldl(
+                                      fun({K,T}, Acc) ->
+                                              lists:keystore(K, 1, Acc, {K, T})
+                                      end, Tuples, L))
+              end, Lists)
     end.
 
 option(Opt, DtlOpts) ->
@@ -150,10 +169,10 @@ default(out_dir)  -> "ebin";
 default(source_ext) -> ".dtl";
 default(module_ext) -> "_dtl";
 default(custom_tags_dir) -> "";
-default(compiler_options) -> [report, return];
+default(compiler_options) -> [return];
 default(recursive) -> true.
 
-compile_dtl(Source, Target, DtlOpts) ->
+compile_dtl(Config, Source, Target, DtlOpts) ->
     case code:which(erlydtl) of
         non_existing ->
             ?ERROR("~n===============================================~n"
@@ -166,13 +185,13 @@ compile_dtl(Source, Target, DtlOpts) ->
         _ ->
             case needs_compile(Source, Target, DtlOpts) of
                 true ->
-                    do_compile(Source, Target, DtlOpts);
+                    do_compile(Config, Source, Target, DtlOpts);
                 false ->
                     skipped
             end
     end.
 
-do_compile(Source, Target, DtlOpts) ->
+do_compile(Config, Source, Target, DtlOpts) ->
     %% TODO: Check last mod on target and referenced DTLs here..
 
     %% ensure that doc_root and out_dir are defined,
@@ -189,18 +208,16 @@ do_compile(Source, Target, DtlOpts) ->
     case erlydtl:compile(Source,
                          module_name(Target),
                          Opts) of
-        ok -> ok;
-        {error, {File, [{Pos, _Mod, Err}]}} ->
-            ?ERROR("Compiling template ~p failed:~n    (~s): ~p~n",
-                [File, err_location(Pos), Err]);
-        Reason ->
-            ?ERROR("Compiling template ~s failed:~n  ~p~n",
-                   [Source, Reason]),
-            ?FAIL
+        ok ->
+            ok;
+        error ->
+            rebar_base_compiler:error_tuple(Config, Source, [], [], Opts);
+        {error, {_File, _Msgs} = Error} ->
+            rebar_base_compiler:error_tuple(Config, Source, [Error], [], Opts);
+        {error, Msg} ->
+            Es = [{Source, [{erlydtl_parser, Msg}]}],
+            rebar_base_compiler:error_tuple(Config, Source, Es, [], Opts)
     end.
-
-err_location({L,C}) -> io_lib:format("line:~w, col:~w", [L, C]);
-err_location(L)     -> io_lib:format("line:~w", [L]).
 
 module_name(Target) ->
     F = filename:basename(Target),

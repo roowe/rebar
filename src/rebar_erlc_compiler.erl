@@ -29,10 +29,12 @@
 -export([compile/2,
          clean/2]).
 
-%% for internal use by only eunit and qc
--export([test_compile/3]).
+%% for internal use only
+-export([test_compile/3,
+         info/2]).
 
 -include("rebar.hrl").
+-include_lib("stdlib/include/erl_compile.hrl").
 
 %% ===================================================================
 %% Public API
@@ -116,8 +118,6 @@ clean(_Config, _AppFile) ->
 
 test_compile(Config, Cmd, OutDir) ->
     %% Obtain all the test modules for inclusion in the compile stage.
-    %% Notice: this could also be achieved with the following
-    %% rebar.config option: {test_compile_opts, [{src_dirs, ["src", "test"]}]}
     TestErls = rebar_utils:find_files("test", ".*\\.erl\$"),
 
     %% Copy source files to eunit dir for cover in case they are not directly
@@ -164,6 +164,42 @@ test_compile(Config, Cmd, OutDir) ->
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+info(help, compile) ->
+    info_help("Build *.erl, *.yrl, *.xrl, and *.mib sources");
+info(help, clean) ->
+    info_help("Delete *.erl, *.yrl, *.xrl, and *.mib build results").
+
+info_help(Description) ->
+    ?CONSOLE(
+       "~s.~n"
+       "~n"
+       "Valid rebar.config options:~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n",
+       [
+        Description,
+        {erl_opts, [no_debug_info,
+                    {i, "myinclude"},
+                    {src_dirs, ["src", "src2", "src3"]},
+                    {platform_define,
+                     "(linux|solaris|freebsd|darwin)", 'HAVE_SENDFILE'},
+                    {platform_define, "(linux|freebsd)", 'BACKLOG', 128},
+                    {platform_define, "R13", 'old_inets'}]},
+        {erl_first_files, ["mymib1", "mymib2"]},
+        {mib_opts, []},
+        {mib_first_files, []},
+        {xrl_opts, []},
+        {xrl_first_files, []},
+        {yrl_opts, []},
+        {yrl_first_files, []}
+       ]).
 
 test_compile_config(Config, Cmd) ->
     {Config1, TriqOpts} = triq_opts(Config),
@@ -366,7 +402,14 @@ compile_mib(Source, Target, Config) ->
     case snmpc:compile(Source, Opts) of
         {ok, _} ->
             Mib = filename:rootname(Target),
-            ok = snmpc:mib_to_hrl(Mib),
+            MibToHrlOpts =
+                case proplists:get_value(verbosity, Opts, undefined) of
+                    undefined ->
+                        #options{specific = []};
+                    Verbosity ->
+                        #options{specific = [{verbosity, Verbosity}]}
+                end,
+            ok = snmpc:mib_to_hrl(Mib, Mib, MibToHrlOpts),
             Hrl_filename = Mib ++ ".hrl",
             rebar_file_utils:mv(Hrl_filename, "include"),
             ok;

@@ -31,12 +31,23 @@ files() ->
      {copy, "c.hrl", "repo/c/include/c.hrl"}
     ].
 
+apply_cmds([], _Params) ->
+    ok;
+apply_cmds([Cmd | Rest], Params) ->
+    io:format("Running: ~s (~p)\n", [Cmd, Params]),
+    {ok, _} = retest_sh:run(Cmd, Params),
+    apply_cmds(Rest, Params).
+
 run(_Dir) ->
-    %% Initialize the b/c apps as mercurial repos so that dependencies pull
+    %% Initialize the b/c apps as git repos so that dependencies pull
     %% properly
-    HgCmd = "/bin/sh -c \"hg init && hg add && hg commit -m 'Initial commit'\"",
-    {ok, _} = retest_sh:run(HgCmd, [{dir, "repo/b"}]),
-    {ok, _} = retest_sh:run(HgCmd, [{dir, "repo/c"}]),
+    GitCmds = ["git init",
+               "git add -A",
+               "git config user.email 'tdeps@example.com'",
+               "git config user.name 'tdeps'",
+               "git commit -a -m 'Initial Commit'"],
+    ok = apply_cmds(GitCmds, [{dir, "repo/b"}]),
+    ok = apply_cmds(GitCmds, [{dir, "repo/c"}]),
 
     {ok, _} = retest_sh:run("./rebar -v get-deps compile", []),
     ok.

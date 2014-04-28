@@ -42,6 +42,9 @@
 
 -export([compile/2]).
 
+%% for internal use only
+-export([info/2]).
+
 -include("rebar.hrl").
 
 %% ============================================================================
@@ -53,12 +56,25 @@ compile(Config, _AppFile) ->
     rebar_base_compiler:run(Config, [],
                             option(doc_root, NeoOpts), ".peg",
                             option(out_dir, NeoOpts),
-                            option(module_ext, NeoOpts) ++ ".beam",
-                            fun compile_neo/3, [{check_last_mod,false}]).
+                            option(module_ext, NeoOpts) ++ ".erl",
+                            fun compile_neo/3, [{check_last_mod, true}]).
 
 %% ============================================================================
 %% Internal functions
 %% ============================================================================
+
+info(help, compile) ->
+    ?CONSOLE(
+       "Build Neotoma (*.peg) sources.~n"
+       "~n"
+       "Valid rebar.config options:~n"
+       "  ~p~n",
+       [
+        {neotoma_opts, [{doc_root, "src"},
+                        {out_dir, "src"},
+                        {source_ext, ".peg"},
+                        {module_ext, ""}]}
+       ]).
 
 neotoma_opts(Config) ->
     rebar_config:get(Config, neotoma_opts, []).

@@ -61,13 +61,16 @@
 %% Additionally, for projects that have separate folders for the core
 %% implementation, and for the unit tests, then the following
 %% <code>rebar.config</code> option can be provided:
-%% <code>{test_compile_opts, [{src_dirs, ["dir"]}]}.</code>.
+%% <code>{eunit_compile_opts, [{src_dirs, ["src", "dir"]}]}.</code>.
 %% @copyright 2009, 2010 Dave Smith
 %% -------------------------------------------------------------------
 -module(rebar_eunit).
 
 -export([eunit/2,
          clean/2]).
+
+%% for internal use only
+-export([info/2]).
 
 -include("rebar.hrl").
 
@@ -99,6 +102,40 @@ clean(_Config, _File) ->
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+info(help, eunit) ->
+    info_help("Run eunit tests");
+info(help, clean) ->
+    Description = ?FMT("Delete eunit test dir (~s)", [?EUNIT_DIR]),
+    info_help(Description).
+
+info_help(Description) ->
+    ?CONSOLE(
+       "~s.~n"
+       "~n"
+       "Valid rebar.config options:~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "Valid command line options:~n"
+       "  suites=\"foo,bar\" (Run tests in foo.erl, test/foo_tests.erl and~n"
+       "                    tests in bar.erl, test/bar_tests.erl)~n"
+       "  tests=\"baz\" (For every existing suite, run the first test whose~n"
+       "               name starts with bar and, if no such test exists,~n"
+       "               run the test whose name starts with bar in the~n"
+       "               suite's _tests module)~n",
+       [
+        Description,
+        {eunit_opts, []},
+        {eunit_compile_opts, []},
+        {eunit_first_files, []},
+        {cover_enabled, false},
+        {cover_print_enabled, false},
+        {cover_export_enabled, false}
+       ]).
 
 run_eunit(Config, CodePath, SrcErls) ->
     %% Build a list of all the .beams in ?EUNIT_DIR -- use this for
@@ -186,7 +223,7 @@ filter_suites(Config, Modules) ->
 filter_suites1(Modules, []) ->
     Modules;
 filter_suites1(Modules, Suites) ->
-    [M || M <- Modules, lists:member(M, Suites)].
+    [M || M <- Suites, lists:member(M, Modules)].
 
 %%
 %% == get matching tests ==
@@ -524,7 +561,10 @@ align_notcovered_count(Module, Covered, NotCovered, true) ->
 
 cover_write_index(Coverage, SrcModules) ->
     {ok, F} = file:open(filename:join([?EUNIT_DIR, "index.html"]), [write]),
-    ok = file:write(F, "<html><head><title>Coverage Summary</title></head>\n"),
+    ok = file:write(F, "<!DOCTYPE HTML><html>\n"
+                        "<head><meta charset=\"utf-8\">"
+                        "<title>Coverage Summary</title></head>\n"
+                        "<body>\n"),
     IsSrcCoverage = fun({Mod,_C,_N}) -> lists:member(Mod, SrcModules) end,
     {SrcCoverage, TestCoverage} = lists:partition(IsSrcCoverage, Coverage),
     cover_write_index_section(F, "Source", SrcCoverage),
@@ -542,7 +582,7 @@ cover_write_index_section(F, SectionName, Coverage) ->
     TotalCoverage = percentage(Covered, NotCovered),
 
     %% Write the report
-    ok = file:write(F, ?FMT("<body><h1>~s Summary</h1>\n", [SectionName])),
+    ok = file:write(F, ?FMT("<h1>~s Summary</h1>\n", [SectionName])),
     ok = file:write(F, ?FMT("<h3>Total: ~s</h3>\n", [TotalCoverage])),
     ok = file:write(F, "<table><tr><th>Module</th><th>Coverage %</th></tr>\n"),
 
@@ -629,7 +669,8 @@ reset_after_eunit({OldProcesses, WasAlive, OldAppEnvs, _OldACs}) ->
                  end,
              ok = application:unset_env(App, K)
          end || App <- Apps, App /= rebar,
-                {K, _V} <- application:get_all_env(App)],
+                {K, _V} <- application:get_all_env(App),
+                K =/= included_applications],
 
     reconstruct_app_env_vars(Apps),
 
@@ -761,11 +802,11 @@ pause_until_net_kernel_stopped() ->
 pause_until_net_kernel_stopped(0) ->
     exit(net_kernel_stop_failed);
 pause_until_net_kernel_stopped(N) ->
-    try
-        timer:sleep(100),
-        pause_until_net_kernel_stopped(N - 1)
-    catch
-        error:badarg ->
+    case node() of
+        'nonode@nohost' ->
             ?DEBUG("Stopped net kernel.\n", []),
-            ok
+            ok;
+        _ ->
+            timer:sleep(100),
+            pause_until_net_kernel_stopped(N - 1)
     end.

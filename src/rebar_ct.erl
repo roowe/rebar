@@ -39,6 +39,9 @@
 
 -export([ct/2]).
 
+%% for internal use only
+-export([info/2]).
+
 -include("rebar.hrl").
 
 %% ===================================================================
@@ -53,6 +56,26 @@ ct(Config, File) ->
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+info(help, ct) ->
+    ?CONSOLE(
+       "Run common_test suites.~n"
+       "~n"
+       "Valid rebar.config options:~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "  ~p~n"
+       "Valid command line options:~n"
+       "  suites=foo,bar - run <test>/foo_SUITE and <test>/bar_SUITE~n"
+       "  case=\"mycase\" - run individual test case foo_SUITE:mycase~n",
+       [
+        {ct_dir, "itest"},
+        {ct_log_dir, "test/logs"},
+        {ct_extra_params, "-boot start_sasl -s myapp"},
+        {ct_use_short_names, true}
+       ]).
+
 run_test_if_present(TestDir, LogDir, Config, File) ->
     case filelib:is_dir(TestDir) of
         false ->
@@ -85,8 +108,17 @@ run_test(TestDir, LogDir, Config, _File) ->
                      " 2>&1 | tee -a " ++ RawLog
              end,
 
-    rebar_utils:sh(Cmd ++ Output, [{env,[{"TESTDIR", TestDir}]}]),
-    check_log(Config, RawLog).
+    ShOpts = [{env,[{"TESTDIR", TestDir}]}, return_on_error],
+    case rebar_utils:sh(Cmd ++ Output, ShOpts) of
+        {ok,_} ->
+            %% in older versions of ct_run, this could have been a failure
+            %% that returned a non-0 code. Check for that!
+            check_success_log(Config, RawLog);
+        {error,Res} ->
+            %% In newer ct_run versions, this may be a sign of a good compile
+            %% that failed cases. In older version, it's a worse error.
+            check_fail_log(Config, RawLog, Cmd ++ Output, Res)
+    end.
 
 clear_log(LogDir, RawLog) ->
     case filelib:ensure_dir(filename:join(LogDir, "index.html")) of
@@ -101,9 +133,23 @@ clear_log(LogDir, RawLog) ->
 
 %% calling ct with erl does not return non-zero on failure - have to check
 %% log results
-check_log(Config, RawLog) ->
+check_success_log(Config, RawLog) ->
+    check_log(Config, RawLog, fun(Msg) -> ?CONSOLE("DONE.\n~s\n", [Msg]) end).
+
+-type err_handler() :: fun((string()) -> no_return()).
+-spec failure_logger(string(), {integer(), string()}) -> err_handler().
+failure_logger(Command, {Rc, Output}) ->
+    fun(_Msg) ->
+            ?ABORT("~s failed with error: ~w and output:~n~s~n",
+                   [Command, Rc, Output])
+    end.
+
+check_fail_log(Config, RawLog, Command, Result) ->
+    check_log(Config, RawLog, failure_logger(Command, Result)).
+
+check_log(Config,RawLog,Fun) ->
     {ok, Msg} =
-        rebar_utils:sh("grep -e 'TEST COMPLETE' -e '{error,make_failed}' "
+        rebar_utils:sh("grep -e \"TEST COMPLETE\" -e \"{error,make_failed}\" "
                        ++ RawLog, [{use_stdout, false}]),
     MakeFailed = string:str(Msg, "{error,make_failed}") =/= 0,
     RunFailed = string:str(Msg, ", 0 failed") =:= 0,
@@ -119,8 +165,9 @@ check_log(Config, RawLog) ->
             ?FAIL;
 
         true ->
-            ?CONSOLE("DONE.\n~s\n", [Msg])
+            Fun(Msg)
     end.
+
 
 %% Show the log if it hasn't already been shown because verbose was on
 show_log(Config, RawLog) ->
@@ -145,6 +192,15 @@ make_cmd(TestDir, RawLogDir, Config) ->
                       ""
               end,
 
+    %% Check for the availability of ct_run; if we can't find it, generate a
+    %% warning and use the old school, less reliable approach to running CT.
+    BaseCmd = case os:find_executable("ct_run") of
+                  false ->
+                      "erl -noshell -s ct_run script_start -s erlang halt";
+                  _ ->
+                      "ct_run -noshell"
+              end,
+
     %% Add the code path of the rebar process to the code path. This
     %% includes the dependencies in the code path. The directories
     %% that are part of the root Erlang install are filtered out to
@@ -156,14 +212,15 @@ make_cmd(TestDir, RawLogDir, Config) ->
     CodePathString = string:join(CodeDirs, " "),
     Cmd = case get_ct_specs(Cwd) of
               undefined ->
-                  ?FMT("erl " % should we expand ERL_PATH?
-                       " -noshell -pa ~s ~s"
+                  ?FMT("~s"
+                       " -pa ~s"
+                       " ~s"
                        " ~s"
                        " -logdir \"~s\""
                        " -env TEST_DIR \"~s\""
-                       " ~s"
-                       " -s ct_run script_start -s erlang halt",
-                       [CodePathString,
+                       " ~s",
+                       [BaseCmd,
+                        CodePathString,
                         Include,
                         build_name(Config),
                         LogDir,
@@ -175,14 +232,15 @@ make_cmd(TestDir, RawLogDir, Config) ->
                       get_suites(Config, TestDir) ++
                       get_case(Config);
               SpecFlags ->
-                  ?FMT("erl " % should we expand ERL_PATH?
-                       " -noshell -pa ~s ~s"
+                  ?FMT("~s"
+                       " -pa ~s"
+                       " ~s"
                        " ~s"
                        " -logdir \"~s\""
                        " -env TEST_DIR \"~s\""
-                       " ~s"
-                       " -s ct_run script_start -s erlang halt",
-                       [CodePathString,
+                       " ~s",
+                       [BaseCmd,
+                        CodePathString,
                         Include,
                         build_name(Config),
                         LogDir,

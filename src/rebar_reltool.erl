@@ -30,6 +30,9 @@
          overlay/2,
          clean/2]).
 
+%% for internal use only
+-export([info/2]).
+
 -include("rebar.hrl").
 -include_lib("kernel/include/file.hrl").
 
@@ -79,6 +82,32 @@ clean(Config, ReltoolFile) ->
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+info(help, generate) ->
+    info_help("Build release with reltool");
+info(help, clean) ->
+    info_help("Delete release");
+info(help, overlay) ->
+    info_help("Run reltool overlays only").
+
+info_help(Description) ->
+    ?CONSOLE(
+       "~s.~n"
+       "~n"
+       "Valid rebar.config options:~n"
+       "  ~n"
+       "Valid reltool.config options:~n"
+       "  {sys, []}~n"
+       "  {target_dir, \"target\"}~n"
+       "  {overlay_vars, \"overlay\"}~n"
+       "  {overlay, []}~n"
+       "Valid command line options:~n"
+       "  target_dir=target~n"
+       "  overlay_vars=VarsFile~n"
+       "  dump_spec=1 (write reltool target spec to reltool.spec)~n",
+       [
+        Description
+       ]).
 
 check_vsn() ->
     %% TODO: use application:load and application:get_key once we require
@@ -137,22 +166,32 @@ process_overlay(Config, ReltoolConfig) ->
 %% providing an additional file on the command-line.
 %%
 overlay_vars(Config, Vars0, ReltoolConfig) ->
-    BaseVars = load_vars_file(proplists:get_value(overlay_vars, ReltoolConfig)),
-    OverrideVars = load_vars_file(rebar_config:get_global(Config,
-                                                          overlay_vars,
-                                                          undefined)),
-    M = fun(_Key, _Base, Override) -> Override end,
+    BaseVars = load_vars_file([proplists:get_value(overlay_vars, ReltoolConfig)]),
+    OverlayVars = rebar_config:get_global(Config, overlay_vars, []),
+    OverrideVars = load_vars_file(string:tokens(OverlayVars, ",")),
+    M = fun merge_overlay_var/3, 
     dict:merge(M, dict:merge(M, Vars0, BaseVars), OverrideVars).
+
+merge_overlay_var(_Key, _Base, Override) -> Override.
 
 %%
 %% If a filename is provided, construct a dict of terms
 %%
-load_vars_file(undefined) ->
+load_vars_file([undefined]) ->
     dict:new();
-load_vars_file(File) ->
+load_vars_file([]) ->
+    dict:new();
+load_vars_file(Files) ->
+    load_vars_file(Files, dict:new()).
+
+load_vars_file([], Dict) ->
+    Dict;
+load_vars_file([File | Files], BaseVars) ->
     case rebar_config:consult_file(File) of
         {ok, Terms} ->
-            dict:from_list(Terms);
+            OverrideVars = dict:from_list(Terms),
+            M = fun merge_overlay_var/3,
+            load_vars_file(Files, dict:merge(M, BaseVars, OverrideVars));
         {error, Reason} ->
             ?ABORT("Unable to load overlay_vars from ~p: ~p\n", [File, Reason])
     end.
