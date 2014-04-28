@@ -193,10 +193,15 @@ make_cmd(TestDir, RawLogDir, Config) ->
     RawLog = filename:join(LogDir, "raw.log"),
     {Cmd, RawLog}.
 
-build_name(Config) ->
+build_name(Config) ->    
     case rebar_config:get_local(Config, ct_use_short_names, false) of
         true -> "-sname test";
-        false -> " -name test@" ++ net_adm:localhost()
+        false -> " -name test@" ++ case os:getenv("CT_IP") of
+                                       false ->
+                                           net_adm:localhost();
+                                       IP ->
+                                           IP
+                                   end
     end.
 
 get_extra_params(Config) ->
