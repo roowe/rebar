@@ -30,27 +30,62 @@
 
 -include("rebar.hrl").
 
--export([shell/2]).
+-export([shell/2, info/2]).
+
+%% NOTE:
+%% this is an attempt to replicate `erl -pa ./ebin -pa deps/*/ebin`. it is
+%% mostly successful but does stop and then restart the user io system to get
+%% around issues with rebar being an escript and starting in `noshell` mode.
+%% it also lacks the ctrl-c interrupt handler that `erl` features. ctrl-c will
+%% immediately kill the script. ctrl-g, however, works fine
 
 shell(_Config, _AppFile) ->
-    ?CONSOLE("NOTICE: Using experimental 'shell' command~n", []),
-    %% backwards way to say we only want this executed
-    %% for the "top level" directory
-    case is_deps_dir(rebar_utils:get_cwd()) of
-        false ->
-            true = code:add_pathz(rebar_utils:ebin_dir()),
-            user_drv:start(),
-            %% this call never returns (until user quits shell)
-            shell:server(false, false);
-        true ->
-            ok
-    end,
-    ok.
+    true = code:add_pathz(rebar_utils:ebin_dir()),
+    %% scan all processes for any with references to the old user and save them to
+    %% update later
+    NeedsUpdate = [Pid || Pid <- erlang:processes(),
+        proplists:get_value(group_leader, erlang:process_info(Pid)) == whereis(user)
+    ],
+    %% terminate the current user
+    ok = supervisor:terminate_child(kernel_sup, user),
+    %% start a new shell (this also starts a new user under the correct group)
+    _ = user_drv:start(),
+    %% wait until user_drv and user have been registered (max 3 seconds)
+    ok = wait_until_user_started(3000),
+    %% set any process that had a reference to the old user's group leader to the
+    %% new user process
+    _ = [erlang:group_leader(whereis(user), Pid) || Pid <- NeedsUpdate],
+    %% enable error_logger's tty output
+    ok = error_logger:swap_handler(tty),
+    %% disable the simple error_logger (which may have been added multiple
+    %% times). removes at most the error_logger added by init and the
+    %% error_logger added by the tty handler
+    ok = remove_error_handler(3),
+    %% this call never returns (until user quits shell)
+    timer:sleep(infinity).
 
-is_deps_dir(Dir) ->
-    case lists:reverse(filename:split(Dir)) of
-        [_, "deps" | _] ->
-            true;
-        _V ->
-            false
+info(help, shell) ->
+    ?CONSOLE(
+        "Start a shell with project and deps preloaded similar to~n"
+        "'erl -pa ebin -pa deps/*/ebin'.~n",
+        []
+    ).
+
+remove_error_handler(0) ->
+    ?WARN("Unable to remove simple error_logger handler~n", []);
+remove_error_handler(N) ->
+    case gen_event:delete_handler(error_logger, error_logger, []) of
+        {error, module_not_found} -> ok;
+        {error_logger, _} -> remove_error_handler(N-1)
+    end.
+
+%% Timeout is a period to wait before giving up
+wait_until_user_started(0) ->
+    ?ABORT("Timeout exceeded waiting for `user` to register itself~n", []),
+    erlang:error(timeout);
+wait_until_user_started(Timeout) ->
+    case whereis(user) of
+        %% if user is not yet registered wait a tenth of a second and try again
+        undefined -> timer:sleep(100), wait_until_user_started(Timeout - 100);
+        _ -> ok
     end.

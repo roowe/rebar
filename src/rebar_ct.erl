@@ -101,7 +101,7 @@ run_test(TestDir, LogDir, Config, _File) ->
     {Cmd, RawLog} = make_cmd(TestDir, LogDir, Config),
     ?DEBUG("ct_run cmd:~n~p~n", [Cmd]),
     clear_log(LogDir, RawLog),
-    Output = case rebar_config:is_verbose(Config) of
+    Output = case rebar_log:is_verbose(Config) of
                  false ->
                      " >> " ++ RawLog ++ " 2>&1";
                  true ->
@@ -172,7 +172,7 @@ check_log(Config,RawLog,Fun) ->
 %% Show the log if it hasn't already been shown because verbose was on
 show_log(Config, RawLog) ->
     ?CONSOLE("Showing log\n", []),
-    case rebar_config:is_verbose(Config) of
+    case rebar_log:is_verbose(Config) of
         false ->
             {ok, Contents} = file:read_file(RawLog),
             ?CONSOLE("~s", [Contents]);
@@ -210,22 +210,20 @@ make_cmd(TestDir, RawLogDir, Config) ->
     CodeDirs = [io_lib:format("\"~s\"", [Dir]) ||
                    Dir <- [EbinDir|NonLibCodeDirs]],
     CodePathString = string:join(CodeDirs, " "),
-    Cmd = case get_ct_specs(Cwd) of
+    Cmd = case get_ct_specs(Config, Cwd) of
               undefined ->
                   ?FMT("~s"
                        " -pa ~s"
                        " ~s"
                        " ~s"
                        " -logdir \"~s\""
-                       " -env TEST_DIR \"~s\""
-                       " ~s",
+                       " -env TEST_DIR \"~s\"",
                        [BaseCmd,
                         CodePathString,
                         Include,
                         build_name(Config),
                         LogDir,
-                        filename:join(Cwd, TestDir),
-                        get_extra_params(Config)]) ++
+                        filename:join(Cwd, TestDir)]) ++
                       get_cover_config(Config, Cwd) ++
                       get_ct_config_file(TestDir) ++
                       get_config_file(TestDir) ++
@@ -237,19 +235,18 @@ make_cmd(TestDir, RawLogDir, Config) ->
                        " ~s"
                        " ~s"
                        " -logdir \"~s\""
-                       " -env TEST_DIR \"~s\""
-                       " ~s",
+                       " -env TEST_DIR \"~s\"",
                        [BaseCmd,
                         CodePathString,
                         Include,
                         build_name(Config),
                         LogDir,
-                        filename:join(Cwd, TestDir),
-                        get_extra_params(Config)]) ++
+                        filename:join(Cwd, TestDir)]) ++
                       SpecFlags ++ get_cover_config(Config, Cwd)
           end,
+    Cmd1 = Cmd ++ get_extra_params(Config),
     RawLog = filename:join(LogDir, "raw.log"),
-    {Cmd, RawLog}.
+    {Cmd1, RawLog}.
 
 build_name(Config) ->    
     case rebar_config:get_local(Config, ct_use_short_names, false) of
@@ -263,10 +260,15 @@ build_name(Config) ->
     end.
 
 get_extra_params(Config) ->
-    rebar_config:get_local(Config, ct_extra_params, "").
+    case rebar_config:get_local(Config, ct_extra_params, undefined) of
+        undefined ->
+            "";
+        Defined ->
+            " " ++ Defined
+    end.
 
-get_ct_specs(Cwd) ->
-    case collect_glob(Cwd, ".*\.test\.spec\$") of
+get_ct_specs(Config, Cwd) ->
+    case collect_glob(Config, Cwd, ".*\.test\.spec\$") of
         [] -> undefined;
         [Spec] ->
             " -spec " ++ Spec;
@@ -280,31 +282,38 @@ get_cover_config(Config, Cwd) ->
         false ->
             "";
         true ->
-            case collect_glob(Cwd, ".*cover\.spec\$") of
+            case collect_glob(Config, Cwd, ".*cover\.spec\$") of
                 [] ->
                     ?DEBUG("No cover spec found: ~s~n", [Cwd]),
                     "";
                 [Spec] ->
-                    ?DEBUG("Found cover file ~w~n", [Spec]),
+                    ?DEBUG("Found cover file ~s~n", [Spec]),
                     " -cover " ++ Spec;
                 Specs ->
                     ?ABORT("Multiple cover specs found: ~p~n", [Specs])
             end
     end.
 
-collect_glob(Cwd, Glob) ->
-    filelib:fold_files(Cwd, Glob, true, fun collect_files/2, []).
+collect_glob(Config, Cwd, Glob) ->
+    {true, Deps} = rebar_deps:get_deps_dir(Config),
+    CwdParts = filename:split(Cwd),
+    filelib:fold_files(Cwd, Glob, true, fun(F, Acc) ->
+        %% Ignore any specs under the deps/ directory. Do this pulling
+        %% the dirname off the F and then splitting it into a list.
+        Parts = filename:split(filename:dirname(F)),
+        Parts2 = remove_common_prefix(Parts, CwdParts),
+        case lists:member(Deps, Parts2) of
+            true ->
+                Acc;                % There is a directory named "deps" in path
+            false ->
+                [F | Acc]           % No "deps" directory in path
+        end
+    end, []).
 
-collect_files(F, Acc) ->
-    %% Ignore any specs under the deps/ directory. Do this pulling
-    %% the dirname off the the F and then splitting it into a list.
-    Parts = filename:split(filename:dirname(F)),
-    case lists:member("deps", Parts) of
-        true ->
-            Acc;                % There is a directory named "deps" in path
-        false ->
-            [F | Acc]           % No "deps" directory in path
-    end.
+remove_common_prefix([H1|T1], [H1|T2]) ->
+    remove_common_prefix(T1, T2);
+remove_common_prefix(L1, _) ->
+    L1.
 
 get_ct_config_file(TestDir) ->
     Config = filename:join(TestDir, "test.config"),
@@ -325,13 +334,21 @@ get_config_file(TestDir) ->
     end.
 
 get_suites(Config, TestDir) ->
-    case rebar_config:get_global(Config, suites, undefined) of
+    case get_suites(Config) of
         undefined ->
             " -dir " ++ TestDir;
         Suites ->
             Suites1 = string:tokens(Suites, ","),
             Suites2 = [find_suite_path(Suite, TestDir) || Suite <- Suites1],
             string:join([" -suite"] ++ Suites2, " ")
+    end.
+
+get_suites(Config) ->
+    case rebar_config:get_global(Config, suites, undefined) of
+        undefined ->
+            rebar_config:get_global(Config, suite, undefined); 
+        Suites ->
+            Suites
     end.
 
 find_suite_path(Suite, TestDir) ->

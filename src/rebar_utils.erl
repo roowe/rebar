@@ -31,28 +31,43 @@
          get_arch/0,
          wordsize/0,
          sh/2,
-         find_files/2, find_files/3,
+         sh_send/3,
+         find_files/2,
+         find_files/3,
          now_str/0,
          ensure_dir/1,
-         beam_to_mod/2, beams/1,
+         beam_to_mod/2,
+         beams/1,
          erl_to_mod/1,
-         abort/0, abort/2,
+         abort/0,
+         abort/2,
          escript_foldl/3,
          find_executable/1,
          prop_check/3,
          expand_code_path/0,
          expand_env_variable/3,
          vcs_vsn/3,
-         deprecated/3, deprecated/4,
-         get_deprecated_global/4, get_deprecated_global/5,
-         get_experimental_global/3, get_experimental_local/3,
-         get_deprecated_list/4, get_deprecated_list/5,
-         get_deprecated_local/4, get_deprecated_local/5,
+         deprecated/3,
+         deprecated/4,
+         get_deprecated_global/4,
+         get_deprecated_global/5,
+         get_experimental_global/3,
+         get_experimental_local/3,
+         get_deprecated_list/4,
+         get_deprecated_list/5,
+         get_deprecated_local/4,
+         get_deprecated_local/5,
          delayed_halt/1,
          erl_opts/1,
          src_dirs/1,
          ebin_dir/0,
-         processing_base_dir/1, processing_base_dir/2]).
+         base_dir/1,
+         processing_base_dir/1,
+         processing_base_dir/2,
+         patch_env/2]).
+
+%% for internal use only
+-export([otp_release/0]).
 
 -include("rebar.hrl").
 
@@ -74,7 +89,7 @@ is_arch(ArchRegex) ->
 
 get_arch() ->
     Words = wordsize(),
-    erlang:system_info(otp_release) ++ "-"
+    otp_release() ++ "-"
         ++ erlang:system_info(system_architecture) ++ "-" ++ Words.
 
 wordsize() ->
@@ -85,6 +100,25 @@ wordsize() ->
         error:badarg ->
             integer_to_list(8 * erlang:system_info(wordsize))
     end.
+
+sh_send(Command0, String, Options0) ->
+    ?INFO("sh_send info:\n\tcwd: ~p\n\tcmd: ~s < ~s\n",
+          [get_cwd(), Command0, String]),
+    ?DEBUG("\topts: ~p\n", [Options0]),
+
+    DefaultOptions = [use_stdout, abort_on_error],
+    Options = [expand_sh_flag(V)
+               || V <- proplists:compact(Options0 ++ DefaultOptions)],
+
+    Command = patch_on_windows(Command0, proplists:get_value(env, Options, [])),
+    PortSettings = proplists:get_all_values(port_settings, Options) ++
+        [exit_status, {line, 16384}, use_stdio, stderr_to_stdout, hide],
+    Port = open_port({spawn, Command}, PortSettings),
+
+    %% allow us to send some data to the shell command's STDIN
+    %% Erlang doesn't let us get any reply after sending an EOF, though...
+    Port ! {self(), {command, String}},
+    port_close(Port).
 
 %%
 %% Options = [Option] -- defaults to [use_stdout, abort_on_error]
@@ -200,12 +234,12 @@ expand_env_variable(InStr, VarName, RawVarValue) ->
             re:replace(InStr, RegEx, [VarValue, "\\2"], ReOpts)
     end.
 
-vcs_vsn(Config, Vcs, Dir) ->
-    Key = {Vcs, Dir},
+vcs_vsn(Config, Vsn, Dir) ->
+    Key = {Vsn, Dir},
     Cache = rebar_config:get_xconf(Config, vsn_cache),
     case dict:find(Key, Cache) of
         error ->
-            VsnString = vcs_vsn_1(Vcs, Dir),
+            VsnString = vcs_vsn_1(Vsn, Dir),
             Cache1 = dict:store(Key, VsnString, Cache),
             Config1 = rebar_config:set_xconf(Config, vsn_cache, Cache1),
             {Config1, VsnString};
@@ -307,16 +341,75 @@ src_dirs(SrcDirs) ->
 ebin_dir() ->
     filename:join(get_cwd(), "ebin").
 
+base_dir(Config) ->
+    rebar_config:get_xconf(Config, base_dir).
+
 processing_base_dir(Config) ->
     Cwd = rebar_utils:get_cwd(),
     processing_base_dir(Config, Cwd).
 
 processing_base_dir(Config, Dir) ->
-    Dir =:= rebar_config:get_xconf(Config, base_dir).
+    AbsDir = filename:absname(Dir),
+    AbsDir =:= base_dir(Config).
+
+%% @doc Returns the list of environment variables including 'REBAR' which
+%% points to the rebar executable used to execute the currently running
+%% command. The environment is not modified if rebar was invoked
+%% programmatically.
+-spec patch_env(rebar_config:config(), [{string(), string()}])
+               -> [{string(), string()}].
+patch_env(Config, []) ->
+    %% If we reached an empty list, the env did not contain the REBAR variable.
+    case rebar_config:get_xconf(Config, escript, "") of
+        "" -> % rebar was invoked programmatically
+            [];
+        Path ->
+            [{"REBAR", Path}]
+    end;
+patch_env(_Config, [{"REBAR", _} | _]=All) ->
+    All;
+patch_env(Config, [E | Rest]) ->
+    [E | patch_env(Config, Rest)].
 
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
+
+otp_release() ->
+    otp_release1(erlang:system_info(otp_release)).
+
+%% If OTP <= R16, otp_release is already what we want.
+otp_release1([$R,N|_]=Rel) when is_integer(N) ->
+    Rel;
+%% If OTP >= 17.x, erlang:system_info(otp_release) returns just the
+%% major version number, we have to read the full version from
+%% a file. See http://www.erlang.org/doc/system_principles/versions.html
+%% Read vsn string from the 'OTP_VERSION' file and return as list without
+%% the "\n".
+otp_release1(Rel) ->
+    File = filename:join([code:root_dir(), "releases", Rel, "OTP_VERSION"]),
+    {ok, Vsn} = file:read_file(File),
+
+    %% It's fine to rely on the binary module here because we can
+    %% be sure that it's available when the otp_release string does
+    %% not begin with $R.
+    Size = byte_size(Vsn),
+    %% The shortest vsn string consists of at least two digits
+    %% followed by "\n". Therefore, it's safe to assume Size >= 3.
+    case binary:part(Vsn, {Size, -3}) of
+        <<"**\n">> ->
+            %% The OTP documentation mentions that a system patched
+            %% using the otp_patch_apply tool available to licensed
+            %% customers will leave a '**' suffix in the version as a
+            %% flag saying the system consists of application versions
+            %% from multiple OTP versions. We ignore this flag and
+            %% drop the suffix, given for all intents and purposes, we
+            %% cannot obtain relevant information from it as far as
+            %% tooling is concerned.
+            binary:bin_to_list(Vsn, {0, Size - 3});
+        _ ->
+            binary:bin_to_list(Vsn, {0, Size - 1})
+    end.
 
 get_deprecated_3(Get, Config, OldOpt, NewOpt, Default, When) ->
     case Get(Config, NewOpt, Default) of
@@ -394,8 +487,9 @@ log_msg_and_abort(Message) ->
 
 -spec log_and_abort(string(), {integer(), string()}) -> no_return().
 log_and_abort(Command, {Rc, Output}) ->
-    ?ABORT("~s failed with error: ~w and output:~n~s~n",
-           [Command, Rc, Output]).
+    ?ABORT("sh(~s)~n"
+           "failed with return code ~w and the following output:~n"
+           "~s~n", [Command, Rc, Output]).
 
 sh_loop(Port, Fun, Acc) ->
     receive
@@ -441,11 +535,12 @@ emulate_escript_foldl(Fun, Acc, File) ->
 
 vcs_vsn_1(Vcs, Dir) ->
     case vcs_vsn_cmd(Vcs) of
-        {unknown, VsnString} ->
-            ?DEBUG("vcs_vsn: Unknown VCS atom in vsn field: ~p\n", [Vcs]),
+        {plain, VsnString} ->
             VsnString;
         {cmd, CmdString} ->
             vcs_vsn_invoke(CmdString, Dir);
+        unknown ->
+            ?ABORT("vcs_vsn: Unknown vsn format: ~p\n", [Vcs]);
         Cmd ->
             %% If there is a valid VCS directory in the application directory,
             %% use that version info
@@ -473,12 +568,14 @@ vcs_vsn_1(Vcs, Dir) ->
     end.
 
 vcs_vsn_cmd(git)    -> "git describe --always --tags";
+vcs_vsn_cmd(p4)     -> "echo #head";
 vcs_vsn_cmd(hg)     -> "hg identify -i";
 vcs_vsn_cmd(bzr)    -> "bzr revno";
 vcs_vsn_cmd(svn)    -> "svnversion";
 vcs_vsn_cmd(fossil) -> "fossil info";
 vcs_vsn_cmd({cmd, _Cmd}=Custom) -> Custom;
-vcs_vsn_cmd(Version) -> {unknown, Version}.
+vcs_vsn_cmd(Version) when is_list(Version) -> {plain, Version};
+vcs_vsn_cmd(_) -> unknown.
 
 vcs_vsn_invoke(Cmd, Dir) ->
     {ok, VsnString} = rebar_utils:sh(Cmd, [{cd, Dir}, {use_stdout, false}]),
